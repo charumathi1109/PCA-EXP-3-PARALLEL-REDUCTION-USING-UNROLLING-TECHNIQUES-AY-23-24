@@ -1,8 +1,4 @@
-# PCA-EXP-3-PARALLEL-REDUCTION-USING-UNROLLING-TECHNIQUES AY 25-26
-<h3>NAME : Charumathi A</h3>
-<h3>REGISTER NO: 212224230045</h3>
-<h3>EX. NO : 3</h3>
-<h3>DATE: 20/08/2026</h3>
+# PCA-EXP-3-PARALLEL-REDUCTION-USING-UNROLLING-TECHNIQUES AY 23-24
 
 <h1> <align=center> PARALLEL REDUCTION USING UNROLLING TECHNIQUES </h3>
   Refer to the kernel reduceUnrolling8 and implement the kernel reduceUnrolling16, in which each thread handles 16 data blocks. Compare kernel performance with reduceUnrolling8 and use the proper metrics and events with nvprof to explain any difference in performance.</h3>
@@ -50,319 +46,217 @@ Memory Deallocation
 28.	Return from the main function.
 
 ## PROGRAM:
-### Unrolling8
-```
-!pip install git+https://github.com/andreinechaev/nvcc4jupyter.git
-%load_ext nvcc4jupyter
-```
-```
-%%writefile reduction_unroll8.cu
+```py
+%%writefile parallel_reduction_unrolling.cu
+// parallel_reduction_unrolling.cu
 #include <stdio.h>
 #include <stdlib.h>
 #include <cuda_runtime.h>
+#include <sys/time.h>
 
-#define CHECK(call) {                                                    \
-    const cudaError_t error = call;                                      \
-    if (error != cudaSuccess) {                                          \
-        printf("Error: %s:%d, ", __FILE__, __LINE__);                    \
-        printf("code:%d, reason: %s\n", error, cudaGetErrorString(error)); \
-        exit(1);                                                         \
-    }                                                                    \
+#define CHECK(call)                                                          \
+{                                                                            \
+    const cudaError_t error = call;                                          \
+    if (error != cudaSuccess)                                                \
+    {                                                                        \
+        fprintf(stderr, "Error: %s:%d, code: %d, reason: %s\n",              \
+                __FILE__, __LINE__, error, cudaGetErrorString(error));       \
+        exit(1);                                                             \
+    }                                                                        \
 }
 
-#define BDIM 512
-
-// GPU reduction kernel with unrolling-8
-__global__ void reduceUnrolling8(int *g_idata, int *g_odata, unsigned int n) {
-    __shared__ int smem[BDIM];
-
-    unsigned int tid = threadIdx.x;
-    unsigned int idx = blockIdx.x * blockDim.x * 8 + threadIdx.x;
-
-    int sum = 0;
-    if (idx + 7 * blockDim.x < n) {
-        int *ptr = g_idata + idx;
-        sum += ptr[0] + ptr[blockDim.x] + ptr[2 * blockDim.x] + ptr[3 * blockDim.x] +
-               ptr[4 * blockDim.x] + ptr[5 * blockDim.x] + ptr[6 * blockDim.x] + ptr[7 * blockDim.x];
-    }
-
-    smem[tid] = sum;
-    __syncthreads();
-
-    // in-block reduction
-    if (BDIM >= 1024 && tid < 512) smem[tid] += smem[tid + 512]; __syncthreads();
-    if (BDIM >= 512  && tid < 256) smem[tid] += smem[tid + 256]; __syncthreads();
-    if (BDIM >= 256  && tid < 128) smem[tid] += smem[tid + 128]; __syncthreads();
-    if (BDIM >= 128  && tid < 64)  smem[tid] += smem[tid + 64];  __syncthreads();
-
-    if (tid < 32) {
-        volatile int *vsmem = smem;
-        vsmem[tid] += vsmem[tid + 32];
-        vsmem[tid] += vsmem[tid + 16];
-        vsmem[tid] += vsmem[tid + 8];
-        vsmem[tid] += vsmem[tid + 4];
-        vsmem[tid] += vsmem[tid + 2];
-        vsmem[tid] += vsmem[tid + 1];
-    }
-
-    if (tid == 0) g_odata[blockIdx.x] = smem[0];
+inline double seconds()
+{
+    struct timeval tp;
+    struct timezone tzp;
+    gettimeofday(&tp, &tzp);
+    return (double)tp.tv_sec + (double)tp.tv_usec * 1e-6;
 }
 
-// CPU reference reduction
-int cpuReduce(int *h_idata, int size) {
-    int sum = 0;
-    for (int i = 0; i < size; i++) sum += h_idata[i];
+// ---------------- Host data initialization ----------------
+void initialData(int *ip, int size)
+{
+    for (int i = 0; i < size; i++)
+        ip[i] = 1;                 // all ones → sum should = size
+}
+
+// ---------------- CPU reduction ----------------
+long long cpuReduce(int *data, int size)
+{
+    long long sum = 0;
+    for (int i = 0; i < size; i++)
+        sum += data[i];
     return sum;
 }
 
-int main(int argc, char **argv) {
-    int size = 1 << 24;  // 16M elements
-    int bytes = size * sizeof(int);
-
-    int *h_idata = (int *)malloc(bytes);
-    for (int i = 0; i < size; i++) h_idata[i] = (int)(rand() & 0xFF);
-
-    int *d_idata, *d_odata;
-    CHECK(cudaMalloc((void **)&d_idata, bytes));
-    CHECK(cudaMemcpy(d_idata, h_idata, bytes, cudaMemcpyHostToDevice));
-
-    int grid = (size + BDIM * 8 - 1) / (BDIM * 8);
-    CHECK(cudaMalloc((void **)&d_odata, grid * sizeof(int)));
-
-    // Launch kernel
-    reduceUnrolling8<<<grid, BDIM>>>(d_idata, d_odata, size);
-    CHECK(cudaDeviceSynchronize());
-
-    // Copy partial results back
-    int *h_odata = (int *)malloc(grid * sizeof(int));
-    CHECK(cudaMemcpy(h_odata, d_odata, grid * sizeof(int), cudaMemcpyDeviceToHost));
-
-    // Final reduction on CPU
-    int gpu_sum = 0;
-    for (int i = 0; i < grid; i++) gpu_sum += h_odata[i];
-
-    int cpu_sum = cpuReduce(h_idata, size);
-
-    printf("CPU sum: %d\n", cpu_sum);
-    printf("GPU sum: %d\n", gpu_sum);
-
-    free(h_idata);
-    free(h_odata);
-    cudaFree(d_idata);
-    cudaFree(d_odata);
-
-    return 0;
-}
-```
-```
-!nvcc -arch=sm_75 reduction_unroll8.cu -o reduction
-!./reduction
-```
-
-### Unrolling16
-
-```
-%%writefile reduction_unroll8_16_simple.cu
-#include <stdio.h>
-#include <stdlib.h>
-#include <cuda_runtime.h>
-
-#define CHECK(call) {                                                    \
-    const cudaError_t error = call;                                      \
-    if (error != cudaSuccess) {                                          \
-        printf("Error: %s:%d, ", __FILE__, __LINE__);                    \
-        printf("code:%d, reason: %s\n", error, cudaGetErrorString(error)); \
-        exit(1);                                                         \
-    }                                                                    \
-}
-
-#define BDIM 512
-
-// ----------- Unroll-8 kernel -----------
+// ---------------- Kernel: reduceUnrolling8 ----------------
 __global__ void reduceUnrolling8(int *g_idata, int *g_odata, unsigned int n)
 {
+    extern __shared__ int sdata[];
+
     unsigned int tid = threadIdx.x;
     unsigned int idx = blockIdx.x * blockDim.x * 8 + threadIdx.x;
 
-    int *idata = g_idata + blockIdx.x * blockDim.x * 8;
+    int sum = 0;
 
-    if (idx + 7 * blockDim.x < n) {
-        int a1 = g_idata[idx];
-        int a2 = g_idata[idx + blockDim.x];
-        int a3 = g_idata[idx + 2 * blockDim.x];
-        int a4 = g_idata[idx + 3 * blockDim.x];
-        int b1 = g_idata[idx + 4 * blockDim.x];
-        int b2 = g_idata[idx + 5 * blockDim.x];
-        int b3 = g_idata[idx + 6 * blockDim.x];
-        int b4 = g_idata[idx + 7 * blockDim.x];
-        g_idata[idx] = a1 + a2 + a3 + a4 + b1 + b2 + b3 + b4;
+    if (idx < n)
+    {
+        sum += g_idata[idx];
+        if (idx + blockDim.x < n)     sum += g_idata[idx + blockDim.x];
+        if (idx + 2 * blockDim.x < n) sum += g_idata[idx + 2 * blockDim.x];
+        if (idx + 3 * blockDim.x < n) sum += g_idata[idx + 3 * blockDim.x];
+        if (idx + 4 * blockDim.x < n) sum += g_idata[idx + 4 * blockDim.x];
+        if (idx + 5 * blockDim.x < n) sum += g_idata[idx + 5 * blockDim.x];
+        if (idx + 6 * blockDim.x < n) sum += g_idata[idx + 6 * blockDim.x];
+        if (idx + 7 * blockDim.x < n) sum += g_idata[idx + 7 * blockDim.x];
     }
 
+    sdata[tid] = sum;
     __syncthreads();
 
-    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-        if (tid < stride)
-            idata[tid] += idata[tid + stride];
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1)
+    {
+        if (tid < s)
+            sdata[tid] += sdata[tid + s];
         __syncthreads();
     }
 
-    if (tid == 0) g_odata[blockIdx.x] = idata[0];
+    if (tid == 0)
+        g_odata[blockIdx.x] = sdata[0];
 }
 
-// ----------- Unroll-16 kernel -----------
-
+// ---------------- Kernel: reduceUnrolling16 ----------------
 __global__ void reduceUnrolling16(int *g_idata, int *g_odata, unsigned int n)
 {
+    extern __shared__ int sdata[];
+
     unsigned int tid = threadIdx.x;
     unsigned int idx = blockIdx.x * blockDim.x * 16 + threadIdx.x;
 
-    // convert global data pointer to local block pointer
-    int *idata = g_idata + blockIdx.x * blockDim.x * 16;
+    int sum = 0;
 
-    // unrolling 16
-    if (idx + 15 * blockDim.x < n) {
-        int a1 = g_idata[idx];
-        int a2 = g_idata[idx + blockDim.x];
-        int a3 = g_idata[idx + 2 * blockDim.x];
-        int a4 = g_idata[idx + 3 * blockDim.x];
-        int b1 = g_idata[idx + 4 * blockDim.x];
-        int b2 = g_idata[idx + 5 * blockDim.x];
-        int b3 = g_idata[idx + 6 * blockDim.x];
-        int b4 = g_idata[idx + 7 * blockDim.x];
-        int c1 = g_idata[idx + 8 * blockDim.x];
-        int c2 = g_idata[idx + 9 * blockDim.x];
-        int c3 = g_idata[idx + 10 * blockDim.x];
-        int c4 = g_idata[idx + 11 * blockDim.x];
-        int d1 = g_idata[idx + 12 * blockDim.x];
-        int d2 = g_idata[idx + 13 * blockDim.x];
-        int d3 = g_idata[idx + 14 * blockDim.x];
-        int d4 = g_idata[idx + 15 * blockDim.x];
-        g_idata[idx] = a1 + a2 + a3 + a4 +
-                       b1 + b2 + b3 + b4 +
-                       c1 + c2 + c3 + c4 +
-                       d1 + d2 + d3 + d4;
+    if (idx < n)
+    {
+        for (int i = 0; i < 16; i++)
+            if (idx + i * blockDim.x < n)
+                sum += g_idata[idx + i * blockDim.x];
     }
 
+    sdata[tid] = sum;
     __syncthreads();
 
-    // in-place reduction in global memory
-    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-        if (tid < stride) {
-            idata[tid] += idata[tid + stride];
-        }
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1)
+    {
+        if (tid < s)
+            sdata[tid] += sdata[tid + s];
         __syncthreads();
     }
 
-    // write result of this block
-    if (tid == 0) g_odata[blockIdx.x] = idata[0];
+    if (tid == 0)
+        g_odata[blockIdx.x] = sdata[0];
 }
 
+// ---------------- Main ----------------
+int main(int argc, char **argv)
+{
+    printf("Parallel Reduction Using Unrolling Techniques\n");
 
-// ----------- CPU reference reduction -----------
-int cpuReduce(int *h_idata, int size) {
-    int sum = 0;
-    for (int i = 0; i < size; i++) sum += h_idata[i];
-    return sum;
-}
+    int n = 1 << 24;  
+    size_t nBytes = n * sizeof(int);
 
-int main() {
-    int size = 1 << 24;  // 16M elements
-    int bytes = size * sizeof(int);
+    int *h_idata = (int*)malloc(nBytes);
+    int *h_odata8, *h_odata16;
 
-    // Allocate and initialize host array
-    int *h_idata = (int *)malloc(bytes);
-    for (int i = 0; i < size; i++)
-        h_idata[i] = rand() & 0xFF;
+    initialData(h_idata, n);
 
-    int *d_idata, *d_odata;
-    CHECK(cudaMalloc((void **)&d_idata, bytes));
+    double cpuStart = seconds();
+    long long sum_cpu = cpuReduce(h_idata, n);
+    double cpuTime = seconds() - cpuStart;
 
-    // Grid sizes for unroll-8 and unroll-16
-    int grid8  = (size + BDIM * 8 - 1) / (BDIM * 8);
-    int grid16 = (size + BDIM * 16 - 1) / (BDIM * 16);
-    CHECK(cudaMalloc((void **)&d_odata, grid8 * sizeof(int))); // max needed
+    printf("CPU Sum = %lld, Time = %f sec\n", sum_cpu, cpuTime);
 
-    // ---------------- CPU reduction ----------------
-    cudaEvent_t start, stop;
-    CHECK(cudaEventCreate(&start));
-    CHECK(cudaEventCreate(&stop));
-    CHECK(cudaEventRecord(start));
-    int cpu_sum = cpuReduce(h_idata, size);
-    CHECK(cudaEventRecord(stop));
-    CHECK(cudaEventSynchronize(stop));
-    float cpuTime;
-    CHECK(cudaEventElapsedTime(&cpuTime, start, stop));
+    int *d_idata, *d_odata8, *d_odata16;
+    CHECK(cudaMalloc((void**)&d_idata, nBytes));
+    CHECK(cudaMemcpy(d_idata, h_idata, nBytes, cudaMemcpyHostToDevice));
 
-    // ---------------- GPU Unroll-8 ----------------
-    CHECK(cudaMemcpy(d_idata, h_idata, bytes, cudaMemcpyHostToDevice));
-    CHECK(cudaEventRecord(start));
-    reduceUnrolling8<<<grid8, BDIM>>>(d_idata, d_odata, size);
-    cudaError_t err8 = cudaGetLastError();
-    if (err8 != cudaSuccess) {
-        printf("Kernel launch error (Unroll-8): %s\n", cudaGetErrorString(err8));
-        return -1;
-    }
-    CHECK(cudaDeviceSynchronize());
-    CHECK(cudaEventRecord(stop));
-    CHECK(cudaEventSynchronize(stop));
-    float gpuTime8;
-    CHECK(cudaEventElapsedTime(&gpuTime8, start, stop));
+    int blockSize = 256;
 
-    int *h_odata = (int *)malloc(grid8 * sizeof(int));
-    CHECK(cudaMemcpy(h_odata, d_odata, grid8 * sizeof(int), cudaMemcpyDeviceToHost));
-    int gpu_sum8 = 0;
-    for (int i = 0; i < grid8; i++) gpu_sum8 += h_odata[i];
+    // ========== reduceUnrolling8 ==========
+    int unroll8 = 8;
+    int gridSize8 = (n + blockSize * unroll8 - 1) / (blockSize * unroll8);
 
-    // ---------------- GPU Unroll-16 ----------------
-    CHECK(cudaMemcpy(d_idata, h_idata, bytes, cudaMemcpyHostToDevice));
-    CHECK(cudaEventRecord(start));
-    reduceUnrolling16<<<grid16, BDIM>>>(d_idata, d_odata, size);
-    cudaError_t err16 = cudaGetLastError();
-    if (err16 != cudaSuccess) {
-        printf("Kernel launch error (Unroll-16): %s\n", cudaGetErrorString(err16));
-        return -1;
-    }
-    CHECK(cudaDeviceSynchronize());
-    CHECK(cudaEventRecord(stop));
-    CHECK(cudaEventSynchronize(stop));
-    float gpuTime16;
-    CHECK(cudaEventElapsedTime(&gpuTime16, start, stop));
+    CHECK(cudaMalloc((void**)&d_odata8, gridSize8 * sizeof(int)));
+    h_odata8 = (int*)malloc(gridSize8 * sizeof(int));
 
-    CHECK(cudaMemcpy(h_odata, d_odata, grid16 * sizeof(int), cudaMemcpyDeviceToHost));
-    int gpu_sum16 = 0;
-    for (int i = 0; i < grid16; i++) gpu_sum16 += h_odata[i];
+    cudaEvent_t start8, stop8;
+    cudaEventCreate(&start8);
+    cudaEventCreate(&stop8);
 
-    // ---------------- Print results ----------------
-    printf("CPU sum   : %d, time %.5f sec\n", cpu_sum, cpuTime / 1000.0f);
-    printf("GPU sum-8 : %d, time %.5f ms\n", gpu_sum8, gpuTime8);
-    printf("GPU sum-16: %d, time %.5f ms\n", gpu_sum16, gpuTime16);
+    cudaEventRecord(start8);
+    reduceUnrolling8<<<gridSize8, blockSize, blockSize * sizeof(int)>>>(d_idata, d_odata8, n);
+    cudaEventRecord(stop8);
+    cudaEventSynchronize(stop8);
 
-    // ---------------- Cleanup ----------------
+    float time8;
+    cudaEventElapsedTime(&time8, start8, stop8);
+    cudaMemcpy(h_odata8, d_odata8, gridSize8 * sizeof(int), cudaMemcpyDeviceToHost);
+
+    long long sum_gpu8 = 0;
+    for (int i = 0; i < gridSize8; i++)
+        sum_gpu8 += h_odata8[i];
+
+    printf("\nUnrolling 8 → GPU Sum = %lld, Time = %f ms\n", sum_gpu8, time8);
+
+    // ========== reduceUnrolling16 ==========
+    int unroll16 = 16;
+    int gridSize16 = (n + blockSize * unroll16 - 1) / (blockSize * unroll16);
+
+    CHECK(cudaMalloc((void**)&d_odata16, gridSize16 * sizeof(int)));
+    h_odata16 = (int*)malloc(gridSize16 * sizeof(int));
+
+    cudaEvent_t start16, stop16;
+    cudaEventCreate(&start16);
+    cudaEventCreate(&stop16);
+
+    cudaEventRecord(start16);
+    reduceUnrolling16<<<gridSize16, blockSize, blockSize * sizeof(int)>>>(d_idata, d_odata16, n);
+    cudaEventRecord(stop16);
+    cudaEventSynchronize(stop16);
+
+    float time16;
+    cudaEventElapsedTime(&time16, start16, stop16);
+    cudaMemcpy(h_odata16, d_odata16, gridSize16 * sizeof(int), cudaMemcpyDeviceToHost);
+
+    long long sum_gpu16 = 0;
+    for (int i = 0; i < gridSize16; i++)
+        sum_gpu16 += h_odata16[i];
+
+    printf("\nUnrolling 16 → GPU Sum = %lld, Time = %f ms\n", sum_gpu16, time16);
+
+    printf("\nSummary:\n");
+    printf(" Unrolling 8  : %f ms\n", time8);
+    printf(" Unrolling 16 : %f ms\n", time16);
+
     free(h_idata);
-    free(h_odata);
-    cudaFree(d_idata);
-    cudaFree(d_odata);
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
+    free(h_odata8);
+    free(h_odata16);
 
+    cudaFree(d_idata);
+    cudaFree(d_odata8);
+    cudaFree(d_odata16);
+
+    cudaDeviceReset();
     return 0;
 }
 
-```
-```
-!nvcc -arch=sm_75 reduction_unroll8_16_simple.cu -o reduction
+!nvcc -arch=sm_75 parallel_reduction_unrolling.cu -o reduction
 !./reduction
 ```
 
 ## OUTPUT:
-### Unrolling8
-
-![17611272030544486879597057801210](https://github.com/user-attachments/assets/04555c55-88cb-4740-b2a0-e4c97a93000f)
-
-### Unrolling16
-
-![17611277519142431346375848682434](https://github.com/user-attachments/assets/06703d76-52db-452d-acce-ee799d93789f)
+<img width="531" height="223" alt="image" src="https://github.com/user-attachments/assets/d3751376-4543-4f55-a0f7-b5fe4805e5fd" />
 
 
 ## RESULT:
-Thus the program has been executed by unrolling by 8 and unrolling by 16. It is observed that `Unrolling16` has executed with less elapsed time than `Unrolling8` with blocks `2139353471`,`2139353471`.
+Thus the program has been executed by unrolling by 8 and unrolling by 16.
+It is observed that unrolling by 16 has executed with less elapsed time than unrolling by 8 with blocks (256, 1, 1) and grids (calculated based on input size).
