@@ -380,7 +380,8 @@ int main(int argc, char **argv)
 ## OUTPUT:
 
 
-![alt text](<Screenshot 2026-08-18 091836.png>)
+<img width="1732" height="122" alt="image" src="https://github.com/user-attachments/assets/54bef002-4393-4dec-b7fd-2637075e613c" />
+
 
 
 
